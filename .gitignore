@@ -1,0 +1,19 @@
+# Logs
+*.log
+
+# Stockfish binary (download separately)
+stockfish.exe
+stockfish
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.env
+venv/
+.venv/
+
+# Build output
+dist/
+build/
+*.spec
