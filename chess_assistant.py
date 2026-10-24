@@ -15,13 +15,15 @@ import asyncio
 import argparse
 import logging
 import math
+import os
 import queue
 import random
-import subprocess
+import shutil
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -32,29 +34,40 @@ from tkinter import font as tkfont
 from playwright.async_api import async_playwright, Page, Browser
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-OUTPUT_DIR  = Path(r"F:\Claude Normal\File")
-OUTPUT_DIR.mkdir(exist_ok=True)
-BRAVE_EXE   = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
-FIREFOX_EXE = r"C:\Program Files\Mozilla Firefox\firefox.exe"
-CDP_PORT    = 9222
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("CHESS_ASSISTANT_DATA_DIR", Path.home() / ".chess-assistant")).expanduser()
+BRAVE_EXE = os.environ.get(
+    "CHESS_ASSISTANT_BRAVE", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+)
+FIREFOX_EXE = os.environ.get("CHESS_ASSISTANT_FIREFOX", r"C:\Program Files\Mozilla Firefox\firefox.exe")
+DEFAULT_CDP_PORT = 9222
 STOCKFISH_CANDIDATES = [
-    str(OUTPUT_DIR / "stockfish.exe"),
-    r"C:\tools\stockfish.exe",
-    "stockfish.exe", "stockfish",
+    APP_DIR / "stockfish.exe",
+    APP_DIR / "stockfish" / "stockfish.exe",
+    Path("stockfish.exe"),
 ]
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(OUTPUT_DIR / "chess_assistant.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
 log = logging.getLogger(__name__)
-logging.getLogger("chess.engine").setLevel(logging.CRITICAL)
-logging.getLogger("playwright").setLevel(logging.WARNING)
-logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+
+def setup_logging(debug: bool = False) -> None:
+    """Configure rotating file and console logging. Called from main(), never on import."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            RotatingFileHandler(
+                DATA_DIR / "chess_assistant.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+            ),
+            logging.StreamHandler(),
+        ],
+    )
+    log.setLevel(level)
+    logging.getLogger("chess.engine").setLevel(logging.CRITICAL)
+    logging.getLogger("playwright").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
 # ─── Opening book ─────────────────────────────────────────────────────────────
@@ -371,7 +384,7 @@ class BoardReader:
 
     async def is_game(self) -> bool:
         try:   return bool(await self._p.evaluate(_JS_IS_GAME))
-        except: return False
+        except Exception: return False
 
     async def read(self) -> Optional[dict]:
         try:
@@ -385,19 +398,19 @@ class BoardReader:
 
     async def color(self) -> str:
         try:   return await self._p.evaluate(_JS_GET_COLOR) or "white"
-        except: return "white"
+        except Exception: return "white"
 
     async def get_time(self) -> Optional[float]:
         try:
             v = await self._p.evaluate(_JS_GET_TIME)
             return float(v) if v is not None else None
-        except: return None
+        except Exception: return None
 
     async def get_moves(self) -> list:
         try:
             moves = await self._p.evaluate(_JS_GET_MOVES)
             return moves if isinstance(moves, list) else []
-        except: return []
+        except Exception: return []
 
     async def inject_anti_throttle(self):
         try:
@@ -408,7 +421,7 @@ class BoardReader:
 
     async def _get_flip(self) -> bool:
         try:   return bool(await self._p.evaluate(_JS_BOARD_FLIP))
-        except: return False
+        except Exception: return False
 
     async def _mouse_bezier(self, tx: float, ty: float):
         """Move mouse via quadratic bezier curve to simulate human hand movement."""
@@ -485,7 +498,7 @@ class Engine:
     async def stop(self):
         if self._engine:
             try: await self._engine.quit()
-            except: pass
+            except Exception: pass
             self._engine = None
 
     @staticmethod
@@ -536,7 +549,7 @@ class Engine:
             move = pv[0]
             uci  = move.uci()
             try:   san = board.san(move)
-            except: san = uci
+            except Exception: san = uci
             cp = (99999. if (sc.is_mate() and (sc.white().mate() or 0) > 0) else
                   -99999. if sc.is_mate() else
                   (sc.white().score() or 0) / 100.)
@@ -544,7 +557,7 @@ class Engine:
                 tmp = board.copy()
                 for mv in pv[:16]:
                     try: pv_sans.append(tmp.san(mv)); tmp.push(mv)
-                    except: break
+                    except Exception: break
             top_moves.append(MoveInfo(
                 uci=uci, san=san, score=cp,
                 mate=sc.white().mate() if sc.is_mate() else None,
@@ -682,11 +695,11 @@ class OverlayUI:
         log.info("Overlay closed → shutdown")
         self._ev.set()
         try: self.root.destroy()
-        except: pass
+        except Exception: pass
 
     def _sync_depth(self):
         try: self._d[0] = self._dv.get()
-        except: pass
+        except Exception: pass
 
     def _toggle_auto(self):
         self._a[0] = not self._a[0]
@@ -798,12 +811,13 @@ class OverlayUI:
 class ChessAssistant:
     POLL = 0.7
 
-    def __init__(self, browser, launch, depth, auto_play, port):
+    def __init__(self, browser, launch, depth, auto_play, port, stockfish=None):
         self._browser  = browser
         self._launch   = launch
         self._auto     = [auto_play]
         self._depth    = [depth]
         self._port     = port
+        self._stockfish = Path(stockfish).expanduser() if stockfish else None
         self._ui_q     = queue.Queue(maxsize=3)
         self._shutdown = threading.Event()
         self._engine: Optional[Engine] = None
@@ -876,12 +890,19 @@ class ChessAssistant:
         return moves[0].uci
 
     def _find_sf(self):
-        import shutil
-        for p in STOCKFISH_CANDIDATES:
-            if Path(p).exists(): return p
+        if self._stockfish:
+            if self._stockfish.exists():
+                return str(self._stockfish)
+            raise FileNotFoundError(f"Stockfish not found at --stockfish path: {self._stockfish}")
+        for candidate in STOCKFISH_CANDIDATES:
+            if candidate.exists():
+                return str(candidate)
         found = shutil.which("stockfish")
-        if found: return found
-        raise FileNotFoundError(f"stockfish.exe tidak ditemukan di {OUTPUT_DIR}")
+        if found:
+            return found
+        raise FileNotFoundError(
+            "stockfish.exe not found. Put it in the project folder, install it on PATH, or pass --stockfish PATH."
+        )
 
     def _run_ui(self):
         ui = OverlayUI(self._ui_q, self._auto, self._depth, self._shutdown, self._last_fen_ref, self._natural)
@@ -889,40 +910,21 @@ class ChessAssistant:
         self._shutdown.set()
 
     async def _get_browser(self, pw):
-        if not self._launch:
+        if not self._launch and self._browser != "firefox":
             cdp = f"http://localhost:{self._port}"
-            log.info("Connecting to %s …", cdp)
+            log.info("Connecting to %s", cdp)
             try:
                 br = await pw.chromium.connect_over_cdp(cdp)
-                log.info("Connected!")
+                log.info("Connected to the existing browser")
                 return br
-            except Exception:
-                # CDP not available — kill existing Brave (opened without debug port),
-                # then relaunch with the debug flag so we can connect.
-                if Path(BRAVE_EXE).exists():
-                    log.info("Brave berjalan tanpa debug port — restart dengan CDP flag…")
-                    subprocess.run(["taskkill", "/F", "/IM", "brave.exe"],
-                                   capture_output=True)
-                    await asyncio.sleep(2)
-                    subprocess.Popen([
-                        BRAVE_EXE,
-                        f"--remote-debugging-port={self._port}",
-                        "--no-first-run",
-                        "--restore-last-session",
-                        "https://www.chess.com/play/online",
-                    ])
-                    await asyncio.sleep(5)
-                    try:
-                        br = await pw.chromium.connect_over_cdp(cdp)
-                        log.info("Connected setelah restart Brave!")
-                        return br
-                    except Exception as e2:
-                        raise ConnectionError(f"Gagal connect setelah restart Brave: {e2}")
-                else:
-                    raise ConnectionError(
-                        f"Brave tidak ditemukan di {BRAVE_EXE}.\n"
-                        f"Buka Brave manual dengan flag: --remote-debugging-port={self._port}"
-                    )
+            except Exception as exc:
+                raise ConnectionError(
+                    f"Could not connect to Brave on {cdp}.\n"
+                    f'Start Brave with: "{BRAVE_EXE}" --remote-debugging-port={self._port} '
+                    f'--user-data-dir="{DATA_DIR / "brave-profile"}"\n'
+                    "or run with --launch to open a dedicated profile."
+                ) from exc
+
         if self._browser == "firefox":
             br = await pw.firefox.launch(
                 headless=False,
@@ -930,11 +932,11 @@ class ChessAssistant:
             )
         else:
             exe = BRAVE_EXE if Path(BRAVE_EXE).exists() else None
-            br = await pw.chromium.launch(
-                headless=False, executable_path=exe,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-        ctx  = await br.new_context(viewport={"width": 1400, "height": 900})
+            profile = DATA_DIR / "brave-profile"
+            profile.mkdir(parents=True, exist_ok=True)
+            args = ["--disable-blink-features=AutomationControlled", f"--user-data-dir={profile}"]
+            br = await pw.chromium.launch(headless=False, executable_path=exe, args=args)
+        ctx = await br.new_context(viewport={"width": 1400, "height": 900})
         page = await ctx.new_page()
         await page.goto("https://www.chess.com/play/online", wait_until="domcontentloaded")
         return br
@@ -945,7 +947,7 @@ class ChessAssistant:
                 try:
                     if "chess.com" in page.url:
                         return page
-                except: pass
+                except Exception: pass
         return None
 
     async def run(self):
@@ -1093,7 +1095,7 @@ class ChessAssistant:
 
                     # Close current browser session
                     try: await browser.close()
-                    except: pass
+                    except Exception: pass
 
                     if disconnected and not self._shutdown.is_set():
                         self._last_fen_ref[0] = ""
@@ -1107,23 +1109,26 @@ class ChessAssistant:
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 def main():
-    # When running as compiled exe, skip argparse and use defaults
+    # When running as a compiled exe, skip argparse and use safe defaults.
     if getattr(sys, 'frozen', False):
+        setup_logging()
         asyncio.run(ChessAssistant(
-            browser="brave", launch=False, depth=18, auto_play=True, port=CDP_PORT
+            browser="brave", launch=False, depth=18, auto_play=True, port=DEFAULT_CDP_PORT
         ).run())
         return
     p = argparse.ArgumentParser(description="Chess.com Assistant")
-    p.add_argument("--browser", default="brave", choices=["brave","firefox"])
-    p.add_argument("--launch",  action="store_true")
-    p.add_argument("--port",    type=int, default=CDP_PORT)
-    p.add_argument("--depth",   type=int, default=18)
+    p.add_argument("--browser", default="brave", choices=["brave", "firefox"])
+    p.add_argument("--launch", action="store_true", help="Open a dedicated browser profile instead of connecting")
+    p.add_argument("--port", type=int, default=DEFAULT_CDP_PORT, choices=range(1, 65536), metavar="1-65535")
+    p.add_argument("--depth", type=int, default=18, choices=range(5, 31), metavar="5-30")
+    p.add_argument("--stockfish", type=Path, default=None, help="Path to the Stockfish executable")
+    p.add_argument("--debug", action="store_true", help="Enable verbose logging")
     p.add_argument("--auto-play", action="store_true")
     args = p.parse_args()
-    log.info("browser=%s launch=%s depth=%d auto=%s",
-             args.browser, args.launch, args.depth, args.auto_play)
+    setup_logging(args.debug)
+    log.info("browser=%s launch=%s depth=%d auto=%s", args.browser, args.launch, args.depth, args.auto_play)
     asyncio.run(ChessAssistant(
-        args.browser, args.launch, args.depth, args.auto_play, args.port
+        args.browser, args.launch, args.depth, args.auto_play, args.port, args.stockfish
     ).run())
 
 if __name__ == "__main__":

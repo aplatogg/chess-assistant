@@ -1,2 +1,2 @@
-chess>=1.10.0
-playwright>=1.40.0
+chess>=1.11.2,<2
+playwright>=1.64.1,<2

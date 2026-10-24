@@ -12,6 +12,9 @@ __pycache__/
 .env
 venv/
 .venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Build output
 dist/

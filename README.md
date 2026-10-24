@@ -5,6 +5,7 @@ Reads the live board state via browser CDP, analyzes with Stockfish, and shows a
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
+![CI](https://github.com/aplatogg/chess-assistant/actions/workflows/ci.yml/badge.svg)
 
 ---
 
@@ -25,8 +26,9 @@ Reads the live board state via browser CDP, analyzes with Stockfish, and shows a
 
 ## Requirements
 
+- **Windows 10 or 11** (the launcher, CDP setup and `tkinter` overlay are Windows-specific)
 - Python 3.10+
-- [Stockfish](https://stockfishchess.org/download/) — place `stockfish.exe` in the same folder as the script
+- [Stockfish](https://stockfishchess.org/download/) - place `stockfish.exe` next to the script, or pass `--stockfish PATH`
 - Brave Browser (recommended) or Firefox
 
 ---
@@ -35,18 +37,22 @@ Reads the live board state via browser CDP, analyzes with Stockfish, and shows a
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/chess-assistant.git
+git clone https://github.com/aplatogg/chess-assistant.git
 cd chess-assistant
 
-# 2. Install Python dependencies
+# 2. Install Python dependencies in a virtual environment
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 
-# 3. Install Playwright browsers
+# 3. Install the Playwright browser driver
 playwright install chromium
+# Only if you use the Firefox launcher:
+# playwright install firefox
 
 # 4. Download Stockfish
 # https://stockfishchess.org/download/
-# Place stockfish.exe in this folder
+# Place stockfish.exe next to chess_assistant.py, or use --stockfish PATH.
 ```
 
 ---
@@ -55,9 +61,16 @@ playwright install chromium
 
 ### Step 1 — Launch Brave with remote debugging
 
-```bash
-"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" --remote-debugging-port=9222
+Use a dedicated profile so this does not touch your normal Brave session:
+
+```powershell
+& "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" `
+  --remote-debugging-port=9222 `
+  --user-data-dir="$env:LOCALAPPDATA\chess-assistant\brave-profile"
 ```
+
+Log in to Chess.com once in that window. If Brave is already running, the
+command above opens a separate profile; the assistant never kills your browser.
 
 ### Step 2 — Open Chess.com and start a game
 
@@ -72,8 +85,14 @@ python chess_assistant.py --browser brave
 # With auto-play enabled from the start
 python chess_assistant.py --browser brave --auto-play
 
-# Custom analysis depth (default: 18)
+# Custom analysis depth (default: 18, range 5-30)
 python chess_assistant.py --depth 20
+
+# Explicit Stockfish path
+python chess_assistant.py --stockfish C:\tools\stockfish.exe
+
+# Verbose logging
+python chess_assistant.py --debug
 
 # Launch a new browser window instead of connecting
 python chess_assistant.py --launch
@@ -127,14 +146,12 @@ Both modes automatically play faster when clock is below 30 seconds.
 
 ## Stockfish Path
 
-The script searches for `stockfish.exe` in this order:
+The script looks for Stockfish in this order:
 
-1. `F:\Claude Normal\File\stockfish.exe` (default output dir)
-2. `C:\tools\stockfish.exe`
-3. `stockfish.exe` (current directory)
-4. System PATH
-
-To use a custom path, edit `STOCKFISH_CANDIDATES` at the top of `chess_assistant.py`.
+1. `--stockfish PATH`
+2. `stockfish.exe` next to `chess_assistant.py`
+3. `stockfish\stockfish.exe` next to the script
+4. `stockfish` on `PATH`
 
 ---
 
@@ -143,10 +160,34 @@ To use a custom path, edit `STOCKFISH_CANDIDATES` at the top of `chess_assistant
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--browser` | `brave` | `brave` or `firefox` |
-| `--launch` | off | Launch new browser instead of connecting to existing |
-| `--port` | `9222` | CDP remote debugging port |
-| `--depth` | `18` | Stockfish analysis depth |
+| `--launch` | off | Open a dedicated browser profile instead of connecting to an existing CDP browser |
+| `--port` | `9222` | CDP remote debugging port (1-65535) |
+| `--depth` | `18` | Stockfish analysis depth (5-30) |
+| `--stockfish` | auto | Path to the Stockfish executable |
+| `--debug` | off | Verbose logging |
 | `--auto-play` | off | Enable auto-play on startup |
+
+`--browser firefox` uses Playwright Firefox (not CDP): run
+`playwright install firefox` first. It opens a fresh Playwright browser, not
+your daily Firefox profile.
+
+### Data and logs
+
+The assistant writes a rotating log to `%USERPROFILE%\.chess-assistant\` and
+keeps the dedicated Brave profile there. Override the location with
+`CHESS_ASSISTANT_DATA_DIR`. The log rotates at 1 MB with three backups.
+`CHESS_ASSISTANT_BRAVE` and `CHESS_ASSISTANT_FIREFOX` override the browser
+executable paths.
+
+---
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest -q
+```
 
 ---
 
