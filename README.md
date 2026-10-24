@@ -151,7 +151,8 @@ The script looks for Stockfish in this order:
 1. `--stockfish PATH`
 2. `stockfish.exe` next to `chess_assistant.py`
 3. `stockfish\stockfish.exe` next to the script
-4. `stockfish` on `PATH`
+4. `stockfish.exe` in the current working directory
+5. `stockfish` on `PATH`
 
 ---
 
