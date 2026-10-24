@@ -33,6 +33,8 @@ import tkinter as tk
 from tkinter import font as tkfont
 from playwright.async_api import async_playwright, Page, Browser
 
+__version__ = "1.0.0"
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("CHESS_ASSISTANT_DATA_DIR", Path.home() / ".chess-assistant")).expanduser()
@@ -1117,6 +1119,7 @@ def main():
         ).run())
         return
     p = argparse.ArgumentParser(description="Chess.com Assistant")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--browser", default="brave", choices=["brave", "firefox"])
     p.add_argument("--launch", action="store_true", help="Open a dedicated browser profile instead of connecting")
     p.add_argument("--port", type=int, default=DEFAULT_CDP_PORT, choices=range(1, 65536), metavar="1-65535")

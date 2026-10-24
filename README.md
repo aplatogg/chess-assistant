@@ -102,28 +102,11 @@ python chess_assistant.py --launch
 
 ## Overlay UI
 
-```
-┌─────────────────────────────────────┐
-│ ♟ Chess.com Assistant            ● │
-├─────────────────────────────────────┤
-│ [========== eval bar ===========]  │
-│           +1.45  62%               │
-│        Sicilian: Najdorf           │
-│ Best: Kuda e4->f6    [AUTO: ON][NAT]│
-│ ⏱ 4:32                             │
-│ Top moves:                          │
-│   1. Kuda e4->f6      +1.45  d18   │
-│   2. Benteng d1->e1   +1.12  d18   │
-│   3. Bidak d4->d5     +0.98  d18   │
-│   4. Gajah c1->e3     +0.87  d18   │
-│   5. Raja g1->h1      +0.71  d18   │
-├─────────────────────────────────────┤
-│ Principal variation:                │
-│   Nf6 d5 Nxd5 Nxd5 Qxd5 Nc6 ...  │
-├─────────────────────────────────────┤
-│ Depth: [18▲▼]  d18 · Putih jalan  │
-└─────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/overlay.png" width="359" alt="Chess.com Assistant overlay: evaluation bar, best move, top five moves and principal variation" />
+</p>
+
+<p align="center"><sub>Example analysis of a Queen's Gambit Declined position.</sub></p>
 
 | Button | Action |
 |--------|--------|
@@ -166,6 +149,7 @@ The script looks for Stockfish in this order:
 | `--depth` | `18` | Stockfish analysis depth (5-30) |
 | `--stockfish` | auto | Path to the Stockfish executable |
 | `--debug` | off | Verbose logging |
+| `--version` | | Print the version and exit |
 | `--auto-play` | off | Enable auto-play on startup |
 
 `--browser firefox` uses Playwright Firefox (not CDP): run
