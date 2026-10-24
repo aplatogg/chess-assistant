@@ -41,4 +41,4 @@ jobs:
         run: python -m compileall -q chess_assistant.py
 
       - name: Test
-        run: pytest -q
+        run: python -m pytest -q
