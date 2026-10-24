@@ -66,7 +66,7 @@ Use a dedicated profile so this does not touch your normal Brave session:
 ```powershell
 & "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" `
   --remote-debugging-port=9222 `
-  --user-data-dir="$env:LOCALAPPDATA\chess-assistant\brave-profile"
+  --user-data-dir="$env:USERPROFILE\.chess-assistant\brave-profile"
 ```
 
 Log in to Chess.com once in that window. If Brave is already running, the
