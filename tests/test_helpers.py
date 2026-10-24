@@ -84,8 +84,18 @@ def test_bot_picker_prefers_a_close_second_move(monkeypatch):
     assert ChessAssistant._pick_move_bot(make_result(0.2, 0.1)) == "move1"
 
 
-def test_sanitize_fen_drops_castling_rights():
-    assert Engine._sanitize_fen("8/8/8/8/8/8/8/8 w KQkq - 0 1") == "8/8/8/8/8/8/8/8 w - - 0 1"
+@pytest.mark.parametrize(
+    ("fen", "expected"),
+    [
+        ("8/8/8/8/8/8/8/8 w", "8/8/8/8/8/8/8/8 w - - 0 1"),
+        ("8/8/8/8/8/8/8/8 w -", "8/8/8/8/8/8/8/8 w - - 0 1"),
+        ("8/8/8/8/8/8/8/8 w - -", "8/8/8/8/8/8/8/8 w - - 0 1"),
+        ("8/8/8/8/8/8/8/8 w - - 0", "8/8/8/8/8/8/8/8 w - - 0 1"),
+        ("8/8/8/8/8/8/8/8 w KQkq - 0 1", "8/8/8/8/8/8/8/8 w - - 0 1"),
+    ],
+)
+def test_sanitize_fen_pads_missing_fields(fen, expected):
+    assert Engine._sanitize_fen(fen) == expected
 
 
 def test_explicit_stockfish_path(tmp_path):

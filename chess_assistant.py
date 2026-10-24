@@ -33,7 +33,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from playwright.async_api import async_playwright, Page, Browser
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 APP_DIR = Path(__file__).resolve().parent
@@ -506,10 +506,12 @@ class Engine:
     @staticmethod
     def _sanitize_fen(fen: str) -> str:
         parts = fen.split()
+        if not parts:
+            return fen
         if len(parts) >= 3:
             parts[2] = '-'
         if len(parts) < 6:
-            parts += (['-'] * (4 - len(parts)) + ['0', '1'])[:6 - len(parts)]
+            parts += ['w', '-', '-', '0', '1'][len(parts) - 1:]
         return ' '.join(parts[:6])
 
     async def analyze(self, fen: str, depth: int) -> AnalysisResult:
@@ -725,7 +727,10 @@ class OverlayUI:
             while True: self._render(self._q.get_nowait())
         except queue.Empty: pass
         if self.root and not self._ev.is_set():
-            self.root.after(80, self._poll)
+            try:
+                self.root.after(80, self._poll)
+            except tk.TclError:
+                pass
 
     @staticmethod
     def _fmt_move(m) -> str:
