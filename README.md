@@ -1,69 +1,157 @@
-# ♟ Chess.com Assistant
+<div align="center">
 
-A real-time Chess.com assistant powered by **Stockfish** and **Playwright**.  
-Reads the live board state via browser CDP, analyzes with Stockfish, and shows a floating overlay with top moves, evaluation bar, and principal variation — with optional auto-play.
+# ♟️ Chess.com Assistant `v1.1.0`
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![CI](https://github.com/aplatogg/chess-assistant/actions/workflows/ci.yml/badge.svg)
+**Real-time Stockfish HUD & adaptive humanization engine for Chess.com over Chrome DevTools Protocol (CDP).**  
+Reads live board state without screen capture, analyzes top 5 candidate lines with multi-threaded Stockfish, and renders an external native `tkinter` HUD with **0% in-page DOM footprint**.
 
----
+[![Release](https://img.shields.io/badge/Release-v1.1.0-89b4fa?style=flat-square)](https://github.com/aplatogg/chess-assistant/releases)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![Engine](https://img.shields.io/badge/Engine-Stockfish%20UCI-a6e3a1?style=flat-square)](https://stockfishchess.org/)
+[![Browser](https://img.shields.io/badge/CDP-Playwright-fab387?style=flat-square)](https://playwright.dev/python/)
+[![Stealth](https://img.shields.io/badge/DOM%20Footprint-0%25%20(Native%20HUD)-94e2d5?style=flat-square)](#architecture--zero-dom-design)
+[![CI](https://img.shields.io/github/actions/workflow/status/aplatogg/chess-assistant/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/aplatogg/chess-assistant/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-f9e2af?style=flat-square)](LICENSE)
 
-## Features
+[**Features**](#key-features) · [**HUD Preview**](#hud-overview--controls) · [**Architecture**](#architecture--zero-dom-design) · [**Humanization Engine**](#adaptive-humanization--elo-presets) · [**Quickstart**](#quickstart) · [**CLI Reference**](#cli-reference)
 
-- **Live board reading** — grabs full FEN (including castling rights & en passant) directly from the Chess.com game object (no screen capture)
-- **Stockfish multi-thread analysis** — top 5 moves with scores, depth, move quality badges (`[BEST]`, `[GOOD]`, `[OK]`, `[RISK]`), and full principal variation
-- **Interactive Modern HUD (`tkinter`)** — zero DOM footprint inside the browser tab, click any top-move row to execute it immediately on the board, live turn & countdown banner, opacity toggle (`100% / 85% / 70%`), and collapsible compact mode (`▬`)
-- **Auto-play & Humanization (`v1.1.0`)**:
-  - `NAT` — adaptive human timing (fast `0.75–1.6s` on obvious recaptures/forced moves, `2.5–4.8s` on complex close decisions, instant mate-in-1 snap, and time-trouble acceleration)
-  - `BOT` — engine-like speed (`~0.2–0.9s`, `~93%` best move rate, forced-mate lock)
-  - `ELO Presets` (`MAX / 2200 / 1800 / 1500`) — scales Stockfish `UCI_LimitStrength` / `Skill Level` and move variety live from the HUD footer
-- **Full promotion & endgame support** — supports all 4 promotion piece types (`=Q`, `=N`, `=R`, `=B`) and 2-piece endgames
-- **Opening book** — recognizes 60+ openings and displays the name live
-- **Time management** — auto-reduces analysis depth when clock is low
-- **Anti-throttle** — injects silent Web Audio to prevent background-tab slowdowns
-- **Brave / Firefox support** — connects to existing browser via CDP or launches fresh
+</div>
 
 ---
 
-## Requirements
+## Key Features
 
-- **Windows 10 or 11** (the launcher, CDP setup and `tkinter` overlay are Windows-specific)
-- Python 3.10+
-- [Stockfish](https://stockfishchess.org/download/) - place `stockfish.exe` next to the script, or pass `--stockfish PATH`
-- Brave Browser (recommended) or Firefox
+| Module | Capability |
+| :--- | :--- |
+| **Zero-DOM Native HUD** | Renders in an external, always-on-top native Windows `tkinter` window (Catppuccin Mocha palette). Injects **zero** HTML/CSS/SVG elements into the Chess.com page DOM. |
+| **Live FEN Extraction** | Reads full FEN strings directly from the Chess.com game state (`castling rights KQkq`, `en passant squares`, active turn) with automatic DOM piece fallback and `python-chess` legality sanitization. |
+| **Click-to-Play Top 5** | Every row in the Top 5 moves list is interactive — click any candidate line (`#1`–`#5`) in the HUD to immediately execute it on the board, even while `AUTO: OFF`. |
+| **Move Quality Badges** | Real-time centipawn gap classification next to each candidate move: `[BEST]` (Green), `[GOOD]` (Blue, `≤ 0.30`), `[OK]` (Yellow, `≤ 0.90`), and `[RISK]` (Red, `> 0.90` or missed forced mate). |
+| **Adaptive Humanization** | Position-aware think delay (`NAT` mode) that accelerates on obvious recaptures/forced replies (`0.75–1.6s`), snaps `M1` mates (`0.55–1.15s`), pauses on complex tactical choices (`2.5–4.8s`), and speeds up under clock pressure. |
+| **Live ELO Presets** | Cycle `ELO: MAX → 2200 → 1800 → 1500` directly from the HUD footer to dynamically tune Stockfish `UCI_LimitStrength` / `UCI_Elo` / `Skill Level` and move variety. |
+| **Multi-Thread Turbo** | Automatically configures Stockfish with `Threads: min(4, cpu_count // 2)` and `128 MB Hash` for fast `MultiPV 5` depth convergence. |
+| **Full Endgame & Promo** | Supports all 4 promotion piece types (`=Q`, `=N` knight underpromotion, `=R`, `=B`) and tracks positions down to 2-piece endgames across Live, Daily, Puzzles, Practice, and Analysis boards. |
 
 ---
 
-## Installation
+## HUD Overview & Controls
 
-```bash
-# 1. Clone the repo
-git clone https://github.com/aplatogg/chess-assistant.git
-cd chess-assistant
+<table>
+<tr>
+<td width="380" align="center">
+  <img src="docs/overlay.png" width="350" alt="Chess.com Assistant v1.1.0 Modern HUD" />
+  <br />
+  <sub><b>Chess.com HUD v1.1.0</b> — Queen's Gambit Declined analysis</sub>
+</td>
+<td valign="top">
 
-# 2. Install Python dependencies in a virtual environment
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+### Interactive HUD Controls
 
-# 3. Install the Playwright browser driver
-playwright install chromium
-# Only if you use the Firefox launcher:
-# playwright install firefox
+| Control | Function |
+| :--- | :--- |
+| **`100% / 85% / 70%`** | Cycles window transparency (`-alpha`) so the board remains visible underneath. |
+| **`▬ / ▣`** | Toggles **Compact Mini Mode** (`360×148`), collapsing the move list and PV into a slim status bar. |
+| **`🟢 GILIRAN LU`** | Live turn indicator & real-time `0.1s` countdown banner (`⚡ AUTO: Kuda b1->c3 (1.4s…)`) during auto-play delay. |
+| **`NAT / BOT`** | Switches between **Adaptive Human (`NAT`)** and **Engine Speed (`BOT`)** execution profiles. |
+| **`AUTO: ON / OFF`** | Toggles hands-free automatic move execution on your turn. |
+| **`Top Move Rows #1–5`** | **Click-to-Play**: clicking any row executes that specific move on the board via Bezier mouse curves. |
+| **`Depth (5–30)`** | Live Stockfish search depth spinner (automatically scales down when clock `< 60s`). |
+| **`ELO: MAX / 2200…`** | Cycles engine strength and human move selection accuracy in real time. |
 
-# 4. Download Stockfish
-# https://stockfishchess.org/download/
-# Place stockfish.exe next to chess_assistant.py, or use --stockfish PATH.
+</td>
+</tr>
+</table>
+
+---
+
+## Architecture & Zero-DOM Design
+
+Unlike browser extensions that inject visible `<div id="overlay">` or `<svg>` arrow layers directly into the Chess.com document tree, **Chess.com Assistant** runs its UI in an isolated native OS process thread and communicates with the browser strictly over local CDP.
+
+```mermaid
+flowchart LR
+    subgraph Browser["Brave / Chromium (CDP :9222)"]
+        Board["Chess.com Game State\n(JS Object / DOM Pieces)"]
+        Input["Trusted CDP Mouse Events\n(Bezier Curve + Jitter)"]
+    end
+
+    subgraph Core["chess_assistant.py (Asyncio Loop)"]
+        Reader["BoardReader\nFEN + Clock + Move List"]
+        Sanitizer["FEN Validator\n(Castling / EP Verification)"]
+        Picker["Move Picker & Humanizer\n(NAT / BOT + ELO Preset)"]
+    end
+
+    subgraph UCI["Stockfish Engine (UCI)"]
+        SF["MultiPV 5 Search\nMulti-Thread + 128MB Hash"]
+    end
+
+    subgraph NativeUI["External Native OS Thread (Zero DOM)"]
+        HUD["OverlayUI (tkinter)\nEval Bar · Badges · Click-to-Play"]
+    end
+
+    Board -->|"page.evaluate()"| Reader
+    Reader --> Sanitizer
+    Sanitizer -->|"UCI Position"| SF
+    SF -->|"Top 5 PV + Scores"| Picker
+    Picker -->|"Thread-Safe Queue"| HUD
+    HUD -->|"Manual Click-to-Play\n& Live Controls"| Picker
+    Picker -->|"click_move()"| Input
 ```
 
 ---
 
-## Usage
+## Adaptive Humanization & ELO Presets
 
-### Step 1 — Launch Brave with remote debugging
+### 1. Position-Aware Think Timing (`NAT` Mode)
 
-Use a dedicated profile so this does not touch your normal Brave session:
+Rather than using a static random delay on every move, `ChessAssistant._human_think_time()` adapts to board complexity and remaining clock:
+
+| Situation | Condition | Delay Range | Behavior |
+| :--- | :--- | :---: | :--- |
+| **Opening Theory** | Move number `< 10` | `1.00s – 2.20s` | Plays top book/engine line confidently |
+| **Mate-in-1 Snap** | Forced `M1` on board | `0.55s – 1.15s` | Instant execution of 1-move checkmate |
+| **Forced Mate (`M2+`)** | Forced mate sequence found | `1.00s – 2.10s` | Locks 100% onto fastest mate (`moves[0]`) |
+| **Obvious / Forced Move** | Eval gap `#1 vs #2 ≥ 2.00` pawns | `0.75s – 1.60s` | Quick recapture or single non-losing reply |
+| **Standard Middlegame** | Normal eval separation | `1.50s – 3.30s` | Balanced human rhythm |
+| **Complex Tactical Choice** | Eval gap `#1 vs #2 < 0.35` pawns | `2.50s – 4.80s` | Pauses longer on critical branching positions |
+| **Low Clock Pressure** | Clock `< 25s` remaining | `0.65s – 1.45s` | Depth scales to `12`, faster mouse cadence |
+| **Bullet / Scramble** | Clock `< 10s` remaining | `0.35s – 0.95s` | Depth scales to `8`, rapid survival mode |
+
+### 2. Live ELO & Move Distribution Presets
+
+| Preset | Stockfish UCI Configuration | Top-1 Move Rate | Close 2nd/3rd Alt Rate | Forced Mate Lock |
+| :---: | :--- | :---: | :---: | :---: |
+| **`ELO: MAX`** | `UCI_LimitStrength=False`, `Skill Level=20` | `~80%` (`NAT`) / `~93%` (`BOT`) | `20%` (only if gap `< 1.5`) | **Always 100% `#1`** |
+| **`ELO: 2200`** | `UCI_LimitStrength=True`, `UCI_Elo=2200` | `~80%` | `20%` (only if gap `< 1.5`) | **Always 100% `#1`** |
+| **`ELO: 1800`** | `UCI_LimitStrength=True`, `UCI_Elo=1800` | `~68%` | `32%` (only if gap `< 1.5`) | **Always 100% `#1`** |
+| **`ELO: 1500`** | `UCI_LimitStrength=True`, `UCI_Elo=1500` | `~55%` | `45%` (only if gap `< 1.5`) | **Always 100% `#1`** |
+
+---
+
+## Quickstart
+
+### Prerequisites
+
+- **Windows 10 / 11** (`tkinter` always-on-top HUD and default browser paths are tuned for Windows)
+- **Python 3.10+**
+- **[Stockfish](https://stockfishchess.org/download/)** — place `stockfish.exe` in the project root, `stockfish\stockfish.exe`, on your `PATH`, or pass `--stockfish PATH`
+- **Brave Browser** (recommended) or **Firefox**
+
+### 1. Clone & Install Dependencies
+
+```powershell
+git clone https://github.com/aplatogg/chess-assistant.git
+cd chess-assistant
+
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium
+```
+
+### 2. Start Brave with Remote Debugging (`CDP`)
+
+Launch Brave with a dedicated profile directory so it runs alongside your normal browser session without conflict:
 
 ```powershell
 & "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" `
@@ -71,143 +159,72 @@ Use a dedicated profile so this does not touch your normal Brave session:
   --user-data-dir="$env:USERPROFILE\.chess-assistant\brave-profile"
 ```
 
-Log in to Chess.com once in that window. If Brave is already running, the
-command above opens a separate profile; the assistant never kills your browser.
+Log in to [Chess.com](https://www.chess.com/play/online) inside that Brave window and open any game, puzzle, or bot match.
 
-### Step 2 — Open Chess.com and start a game
+### 3. Launch the Assistant
 
-Go to [chess.com/play/online](https://www.chess.com/play/online) and start a game.
-
-### Step 3 — Run the assistant
-
-```bash
-# Connect to running Brave (recommended)
+```powershell
+# Connect to Brave on port 9222 (manual HUD + Click-to-Play enabled)
 python chess_assistant.py --browser brave
 
-# With auto-play enabled from the start
+# Start with Auto-Play enabled immediately
 python chess_assistant.py --browser brave --auto-play
 
-# Custom analysis depth (default: 18, range 5-30)
-python chess_assistant.py --depth 20
+# Custom Stockfish search depth (5-30) and explicit engine binary path
+python chess_assistant.py --browser brave --depth 20 --stockfish "C:\tools\stockfish.exe"
 
-# Explicit Stockfish path
-python chess_assistant.py --stockfish C:\tools\stockfish.exe
-
-# Verbose logging
-python chess_assistant.py --debug
-
-# Launch a new browser window instead of connecting
+# Launch a dedicated browser window automatically instead of attaching to CDP
 python chess_assistant.py --launch
 ```
 
 ---
 
-## Overlay UI
+## CLI Reference
 
-<p align="center">
-  <img src="docs/overlay.png" width="359" alt="Chess.com Assistant overlay: evaluation bar, best move, top five moves and principal variation" />
-</p>
+| Flag | Default | Description |
+| :--- | :---: | :--- |
+| `--browser {brave,firefox}` | `brave` | Target browser engine (`brave` attaches over CDP or launches; `firefox` launches Playwright Firefox). |
+| `--launch` | `False` | Launch a dedicated browser instance automatically instead of connecting to an existing CDP port. |
+| `--port 1-65535` | `9222` | Local Chrome DevTools Protocol (CDP) debugging port. |
+| `--depth 5-30` | `18` | Base Stockfish search depth (dynamically scales down when clock `< 60s`). |
+| `--stockfish PATH` | `auto` | Explicit path to `stockfish.exe`. |
+| `--auto-play` | `False` | Start with `AUTO: ON` enabled immediately. |
+| `--debug` | `False` | Enable verbose debug logging to console and rotating log file. |
+| `--version` | — | Display version (`1.1.0`) and exit. |
 
-<p align="center"><sub>Example analysis of a Queen's Gambit Declined position.</sub></p>
+### Environment Variables & Logs
 
-| Control | Action |
-|--------|--------|
-| `Click Top Move #1–#5` | Immediately execute that move on the board (works even when `AUTO: OFF`) |
-| `AUTO: ON/OFF` | Toggle auto-play |
-| `NAT / BOT` | Switch between adaptive human-like and engine-like play style |
-| `ELO: MAX / 2200 / 1800 / 1500` | Cycle engine strength & human move accuracy preset |
-| `100% / 85% / 70%` | Cycle HUD window transparency (`-alpha`) |
-| `▬ / ▣` | Collapse/expand HUD into a compact mini bar |
-| `Depth spinner` | Adjust Stockfish analysis depth (5–30) |
-
----
-
-## Auto-play Modes
-
-| Mode | Think time | Move accuracy | Behavior |
-|------|-----------|-------------|---------|
-| **NAT** | Adaptive (`0.75–1.6s` forced, `1.5–3.3s` normal, `2.5–4.8s` tactical) | Scales with `ELO` preset (`~80%` at `MAX`, `100%` on forced mates) | Human-like pacing and natural move distribution |
-| **BOT** | `0.2–0.9s` (`0.1–0.3s` under 15s) | `~93%` (`100%` on forced mates) | Maximum speed, engine-like |
-
-Both modes automatically play faster when clock is below 30 seconds.
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `CHESS_ASSISTANT_DATA_DIR` | `%USERPROFILE%\.chess-assistant` | Directory for rotating logs (`chess_assistant.log`, 1 MB × 3 backups) and the dedicated `--launch` profile. |
+| `CHESS_ASSISTANT_BRAVE` | `C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe` | Override Brave executable path. |
+| `CHESS_ASSISTANT_FIREFOX` | `C:\Program Files\Mozilla Firefox\firefox.exe` | Override Firefox executable path. |
 
 ---
 
-## Stockfish Path
+## Development & Testing
 
-The script looks for Stockfish in this order:
-
-1. `--stockfish PATH`
-2. `stockfish.exe` next to `chess_assistant.py`
-3. `stockfish\stockfish.exe` next to the script
-4. `stockfish.exe` in the current working directory
-5. `stockfish` on `PATH`
-
----
-
-## CLI Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--browser` | `brave` | `brave` or `firefox` |
-| `--launch` | off | Open a dedicated browser profile instead of connecting to an existing CDP browser |
-| `--port` | `9222` | CDP remote debugging port (1-65535) |
-| `--depth` | `18` | Stockfish analysis depth (5-30) |
-| `--stockfish` | auto | Path to the Stockfish executable |
-| `--debug` | off | Verbose logging |
-| `--version` | | Print the version and exit |
-| `--auto-play` | off | Enable auto-play on startup |
-
-`--browser firefox` uses Playwright Firefox (not CDP): run
-`playwright install firefox` first. It opens a fresh Playwright browser, not
-your daily Firefox profile.
-
-### Data and logs
-
-The assistant writes a rotating log to `%USERPROFILE%\.chess-assistant\` and
-keeps the dedicated Brave profile there. Override the location with
-`CHESS_ASSISTANT_DATA_DIR`. The log rotates at 1 MB with three backups.
-`CHESS_ASSISTANT_BRAVE` and `CHESS_ASSISTANT_FIREFOX` override the browser
-executable paths.
-
----
-
-## Development
-
-```bash
+```powershell
 pip install -r requirements-dev.txt
+
+# Run linter
 ruff check .
+
+# Run unit test suite (16 tests)
 python -m pytest -q
 ```
 
 ---
 
-## How It Works
-
-1. **Board reading** — Connects to Brave/Chrome via Chrome DevTools Protocol (CDP). Reads the FEN position directly from the Chess.com JavaScript game object (`board.game.getFEN()`), falling back to DOM piece parsing if the API is unavailable.
-
-2. **Engine analysis** — Sends the FEN to Stockfish via UCI protocol using `python-chess`. Requests `MultiPV 5` (top 5 moves) with configurable depth.
-
-3. **Overlay** — A `tkinter` window rendered on a separate thread, always on top. Updates every ~0.7 seconds via a thread-safe queue.
-
-4. **Auto-play** — On our turn, waits for the configured think delay, verifies the position hasn't changed (opponent didn't premove), then simulates mouse clicks on the board squares using CDP mouse events with a Bezier curve movement path.
-
----
-
 ## Disclaimer
 
-This tool is for **educational and research purposes** only.  
-Using third-party assistance tools during rated Chess.com games violates their [Terms of Service](https://www.chess.com/legal/user-agreement).  
-Use only in unrated games, puzzles, or analysis mode.
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
+This software is built for **educational research, UI automation study, and offline/unrated engine testing**.  
+Using external engine assistance during rated games on Chess.com violates their [Fair Play Policy & Terms of Service](https://www.chess.com/legal/user-agreement). Use responsibly in unrated games, bot matches, puzzles, or analysis boards.
 
 ---
 
 <div align="center">
-  Made by <a href="https://github.com/aplatogg">@aplatogg</a>
+
+**[MIT License](LICENSE)** · Crafted by **[@aplatogg](https://github.com/aplatogg)**
+
 </div>
