@@ -33,7 +33,8 @@ import tkinter as tk
 from tkinter import font as tkfont
 from playwright.async_api import async_playwright, Page, Browser
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
+ELO_PRESETS = ("MAX", "2200", "1800", "1500")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 APP_DIR = Path(__file__).resolve().parent
@@ -172,6 +173,10 @@ class AnalysisResult:
     opening:    str  = ""
     time_left:  Optional[float] = None
     win_prob:   float = 50.0
+    our_color:  str  = "white"
+    is_our_turn: bool = True
+    think_delay: float = 0.0
+    chosen_uci: str  = ""
 
 
 def _score_to_winpct(score: float, mate: Optional[int]) -> float:
@@ -179,6 +184,24 @@ def _score_to_winpct(score: float, mate: Optional[int]) -> float:
     if mate is not None:
         return 100.0 if mate > 0 else 0.0
     return 1.0 / (1.0 + math.exp(-score * 0.37)) * 100.0
+
+
+def _move_quality_tag(best: MoveInfo, candidate: MoveInfo, rank: int = 0) -> str:
+    """Classify candidate move quality relative to the top engine move."""
+    if rank == 0:
+        return "BEST"
+    if best.mate is not None:
+        if candidate.mate == best.mate:
+            return "BEST"
+        if candidate.mate is not None and ((best.mate > 0) == (candidate.mate > 0)):
+            return "GOOD"
+        return "RISK"
+    gap = abs(best.score - candidate.score)
+    if gap <= 0.30:
+        return "GOOD"
+    if gap <= 0.90:
+        return "OK"
+    return "RISK"
 
 
 # ─── JavaScript ───────────────────────────────────────────────────────────────
@@ -503,15 +526,55 @@ class BoardReader:
 
 # ─── Async Stockfish engine ────────────────────────────────────────────────────
 class Engine:
+    _ELO_SKILL_MAP = {"MAX": 20, "2200": 15, "1800": 10, "1500": 6}
+
     def __init__(self, path: str, multipv: int = 5):
         self._path   = path
         self._mpv    = multipv
         self._engine = None
         self._transport = None
+        self._elo_preset = "MAX"
 
     async def _spawn(self):
         self._transport, self._engine = await chess.engine.popen_uci(self._path)
-        await self._engine.configure({"Threads": 1, "Hash": 32})
+        threads = max(1, min(4, (os.cpu_count() or 2) // 2))
+        try:
+            await self._engine.configure({"Threads": threads, "Hash": 128})
+        except Exception:
+            await self._engine.configure({"Threads": 1, "Hash": 32})
+        await self._apply_elo_preset(self._elo_preset)
+
+    async def _apply_elo_preset(self, preset: str):
+        if not self._engine:
+            return
+        opts = getattr(self._engine, "options", {}) or {}
+        cfg = {}
+        if preset == "MAX" or not preset.isdigit():
+            if "UCI_LimitStrength" in opts:
+                cfg["UCI_LimitStrength"] = False
+            if "Skill Level" in opts:
+                cfg["Skill Level"] = 20
+        else:
+            elo_val = int(preset)
+            if "UCI_LimitStrength" in opts and "UCI_Elo" in opts:
+                cfg["UCI_LimitStrength"] = True
+                cfg["UCI_Elo"] = elo_val
+            elif "Skill Level" in opts:
+                cfg["Skill Level"] = self._ELO_SKILL_MAP.get(preset, 20)
+        if cfg:
+            try:
+                await self._engine.configure(cfg)
+            except Exception as e:
+                log.debug("UCI ELO preset configure skipped: %s", e)
+
+    async def set_elo_preset(self, preset: str):
+        if preset not in ELO_PRESETS:
+            preset = "MAX"
+        if preset == self._elo_preset:
+            return
+        self._elo_preset = preset
+        await self._apply_elo_preset(preset)
+        log.info("Engine ELO preset -> %s", preset)
 
     async def start(self):
         await self._spawn()
@@ -609,121 +672,210 @@ class Engine:
 
 # ─── Overlay UI ───────────────────────────────────────────────────────────────
 class OverlayUI:
-    W, H   = 335, 465
+    W, H      = 360, 505
+    COMPACT_H = 148
     BG     = "#1e1e2e"; HDR = "#313244"; FG = "#cdd6f4"
-    MUTED  = "#585b70"; BLUE = "#89b4fa"
+    MUTED  = "#585b70"; BLUE = "#89b4fa"; CYAN = "#94e2d5"
     GREEN  = "#a6e3a1"; RED = "#f38ba8"; YELL = "#f9e2af"
-    ORANGE = "#fab387"; DARK   = "#181825"
+    ORANGE = "#fab387"; DARK = "#181825"; HOVER = "#383a52"
+    ROW_BG = "#252538"
 
     _PIECE_NAME = {'K':'Raja','Q':'Ratu','R':'Benteng','B':'Gajah','N':'Kuda','P':'Bidak'}
+    _OPACITIES  = (1.0, 0.85, 0.70)
 
-    def __init__(self, ui_q, auto_flag, depth_ref, shutdown_ev, last_fen_ref, natural_flag):
+    def __init__(self, ui_q, auto_flag, depth_ref, shutdown_ev, last_fen_ref, natural_flag,
+                 elo_ref=None, manual_q=None):
         self._q   = ui_q
         self._a   = auto_flag
         self._d   = depth_ref
         self._ev  = shutdown_ev
         self._lfr = last_fen_ref
         self._nat = natural_flag
+        self._elo = elo_ref if elo_ref is not None else ["MAX"]
+        self._mq  = manual_q if manual_q is not None else queue.Queue()
         self.root = None
+        self._compact = False
+        self._op_idx  = 0
+        self._cur_moves = []
+        self._countdown_end = 0.0
+        self._countdown_txt = ""
 
     def build(self):
         r = tk.Tk()
         self.root = r
-        r.title("Chess Assistant")
+        r.title("Chess Assistant v1.1")
         r.geometry(f"{self.W}x{self.H}+15+15")
         r.configure(bg=self.BG)
         r.attributes("-topmost", True)
         r.resizable(False, False)
         r.protocol("WM_DELETE_WINDOW", self._close)
 
-        mono  = tkfont.Font(family="Consolas", size=10)
+        mono  = tkfont.Font(family="Consolas", size=9)
         bold  = tkfont.Font(family="Consolas", size=10, weight="bold")
         small = tkfont.Font(family="Consolas", size=9)
         big   = tkfont.Font(family="Consolas", size=13, weight="bold")
         tiny  = tkfont.Font(family="Consolas", size=8)
+        badge_f = tkfont.Font(family="Consolas", size=8, weight="bold")
 
         # Header
-        hdr = tk.Frame(r, bg=self.HDR, height=30)
+        hdr = tk.Frame(r, bg=self.HDR, height=32)
         hdr.pack(fill=tk.X); hdr.pack_propagate(False)
-        tk.Label(hdr, text="♟ Chess.com Assistant",
+        tk.Label(hdr, text="♟ Chess.com HUD v1.1",
                  bg=self.HDR, fg=self.BLUE, font=bold).pack(side=tk.LEFT, padx=8)
         self._dot = tk.Label(hdr, text="●", bg=self.HDR, fg=self.MUTED, font=bold)
-        self._dot.pack(side=tk.RIGHT, padx=8)
+        self._dot.pack(side=tk.RIGHT, padx=(4, 8))
+        self._cbtn = tk.Button(hdr, text="▬", bg=self.DARK, fg=self.FG,
+                               font=tiny, relief=tk.FLAT, padx=5,
+                               cursor="hand2", command=self._toggle_compact)
+        self._cbtn.pack(side=tk.RIGHT, padx=2, pady=4)
+        self._obtn = tk.Button(hdr, text="100%", bg=self.DARK, fg=self.CYAN,
+                               font=tiny, relief=tk.FLAT, padx=5,
+                               cursor="hand2", command=self._toggle_opacity)
+        self._obtn.pack(side=tk.RIGHT, padx=2, pady=4)
 
         # Eval bar + score
         ef = tk.Frame(r, bg=self.BG)
-        ef.pack(fill=tk.X, padx=8, pady=(8,0))
-        self._bar = tk.Canvas(ef, height=20, bg="#2a2a3d",
-                               highlightthickness=1, highlightbackground=self.MUTED)
+        ef.pack(fill=tk.X, padx=8, pady=(6, 0))
+        self._bar = tk.Canvas(ef, height=18, bg="#2a2a3d",
+                              highlightthickness=1, highlightbackground=self.MUTED)
         self._bar.pack(fill=tk.X)
         self._eval_lbl = tk.Label(ef, text="—", bg=self.BG, fg=self.FG, font=big, anchor=tk.CENTER)
-        self._eval_lbl.pack(fill=tk.X)
+        self._eval_lbl.pack(fill=tk.X, pady=(2, 0))
 
-        # Opening name
-        self._opening_lbl = tk.Label(r, text="", bg=self.BG, fg=self.YELL,
-                                      font=tiny, anchor=tk.CENTER)
-        self._opening_lbl.pack(fill=tk.X, padx=8)
+        # Turn / Action / Countdown Banner
+        self._turn_lbl = tk.Label(r, text="Menunggu papan Chess.com…", bg=self.DARK, fg=self.MUTED,
+                                  font=small, anchor=tk.CENTER, pady=2)
+        self._turn_lbl.pack(fill=tk.X, padx=8, pady=(2, 2))
 
         # Best move + AUTO + MODE buttons
         bf = tk.Frame(r, bg=self.BG)
-        bf.pack(fill=tk.X, padx=8, pady=(2,0))
+        bf.pack(fill=tk.X, padx=8, pady=(2, 2))
         tk.Label(bf, text="Best:", bg=self.BG, fg=self.MUTED, font=small).pack(side=tk.LEFT)
         self._best = tk.Label(bf, text="—", bg=self.BG, fg=self.GREEN, font=bold)
         self._best.pack(side=tk.LEFT, padx=5)
         init_auto_txt = "AUTO: ON"  if self._a[0] else "AUTO: OFF"
         init_auto_col = self.GREEN  if self._a[0] else self.RED
         self._abtn = tk.Button(bf, text=init_auto_txt, bg=self.HDR, fg=init_auto_col,
-                                font=small, relief=tk.FLAT, padx=6,
-                                cursor="hand2", command=self._toggle_auto)
+                               font=small, relief=tk.FLAT, padx=6,
+                               cursor="hand2", command=self._toggle_auto)
         self._abtn.pack(side=tk.RIGHT)
         init_mode_txt = "NAT" if self._nat[0] else "BOT"
         init_mode_col = self.BLUE if self._nat[0] else self.ORANGE
         self._mbtn = tk.Button(bf, text=init_mode_txt, bg=self.HDR, fg=init_mode_col,
-                                font=small, relief=tk.FLAT, padx=6,
-                                cursor="hand2", command=self._toggle_mode)
+                               font=small, relief=tk.FLAT, padx=6,
+                               cursor="hand2", command=self._toggle_mode)
         self._mbtn.pack(side=tk.RIGHT, padx=(0, 4))
 
-        # Time left label
-        self._time_lbl = tk.Label(r, text="", bg=self.BG, fg=self.MUTED, font=tiny, anchor=tk.W)
-        self._time_lbl.pack(fill=tk.X, padx=8)
+        # Collapsible Body
+        self._body = tk.Frame(r, bg=self.BG)
+        self._body.pack(fill=tk.BOTH, expand=True)
 
-        # Top moves
-        tk.Label(r, text="Top moves:", bg=self.BG, fg=self.MUTED,
-                 font=small, anchor=tk.W).pack(fill=tk.X, padx=8, pady=(4,0))
-        mf = tk.Frame(r, bg=self.BG); mf.pack(fill=tk.X, padx=8)
+        # Opening + Time row
+        meta = tk.Frame(self._body, bg=self.BG)
+        meta.pack(fill=tk.X, padx=8, pady=(2, 0))
+        self._time_lbl = tk.Label(meta, text="", bg=self.BG, fg=self.MUTED, font=tiny, anchor=tk.W)
+        self._time_lbl.pack(side=tk.LEFT)
+        self._opening_lbl = tk.Label(meta, text="", bg=self.BG, fg=self.YELL, font=tiny, anchor=tk.E)
+        self._opening_lbl.pack(side=tk.RIGHT)
+
+        # Top moves (Click-to-Play)
+        tk.Label(self._body, text="Top moves (klik baris untuk jalan):", bg=self.BG, fg=self.MUTED,
+                 font=tiny, anchor=tk.W).pack(fill=tk.X, padx=8, pady=(4, 2))
+        mf = tk.Frame(self._body, bg=self.BG)
+        mf.pack(fill=tk.X, padx=8)
+        self._mrows = []
         self._mlbls = []
-        for _ in range(5):
-            l = tk.Label(mf, text="", bg=self.BG, fg=self.FG, font=mono, anchor=tk.W)
-            l.pack(fill=tk.X); self._mlbls.append(l)
+        self._mbadges = []
+        for idx in range(5):
+            row = tk.Frame(mf, bg=self.ROW_BG, cursor="hand2")
+            row.pack(fill=tk.X, pady=1)
+            l = tk.Label(row, text="", bg=self.ROW_BG, fg=self.FG, font=mono, anchor=tk.W, padx=4, pady=2)
+            l.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            b = tk.Label(row, text="", bg=self.ROW_BG, fg=self.MUTED, font=badge_f, anchor=tk.E, padx=4)
+            b.pack(side=tk.RIGHT)
+            for w in (row, l, b):
+                w.bind("<Button-1>", lambda _e, i=idx: self._on_click_move(i))
+                w.bind("<Enter>", lambda _e, rw=row, lb=l, bgd=b: self._hover_row(rw, lb, bgd, True))
+                w.bind("<Leave>", lambda _e, rw=row, lb=l, bgd=b: self._hover_row(rw, lb, bgd, False))
+            self._mrows.append(row)
+            self._mlbls.append(l)
+            self._mbadges.append(b)
 
         # Divider + PV
-        tk.Frame(r, bg=self.MUTED, height=1).pack(fill=tk.X, padx=8, pady=5)
-        tk.Label(r, text="Principal variation:", bg=self.BG, fg=self.MUTED,
-                 font=small, anchor=tk.W).pack(fill=tk.X, padx=8)
-        self._pv = tk.Text(r, height=4, bg=self.DARK, fg=self.YELL,
-                            font=small, relief=tk.FLAT, wrap=tk.WORD,
-                            state=tk.DISABLED, padx=4, pady=3)
-        self._pv.pack(fill=tk.X, padx=8, pady=(0,4))
+        tk.Frame(self._body, bg=self.MUTED, height=1).pack(fill=tk.X, padx=8, pady=5)
+        tk.Label(self._body, text="Principal variation:", bg=self.BG, fg=self.MUTED,
+                 font=tiny, anchor=tk.W).pack(fill=tk.X, padx=8)
+        self._pv = tk.Text(self._body, height=3, bg=self.DARK, fg=self.YELL,
+                           font=small, relief=tk.FLAT, wrap=tk.WORD,
+                           state=tk.DISABLED, padx=4, pady=3)
+        self._pv.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        # Watermark
+        wm = tk.Label(self._body, text="by github.com/aplatogg",
+                      bg=self.BG, fg=self.MUTED, font=tiny, anchor=tk.CENTER)
+        wm.pack(fill=tk.X, pady=(0, 2))
 
         # Footer
         ft = tk.Frame(r, bg=self.HDR)
         ft.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Label(ft, text="Depth:", bg=self.HDR, fg=self.MUTED,
-                 font=small).pack(side=tk.LEFT, padx=(8,2), pady=4)
+                 font=small).pack(side=tk.LEFT, padx=(8, 2), pady=4)
         self._dv = tk.IntVar(value=self._d[0])
         self._dv.trace_add("write", lambda *_: self._sync_depth())
         tk.Spinbox(ft, from_=5, to=30, textvariable=self._dv, width=3,
                    bg=self.HDR, fg=self.FG, font=small,
                    relief=tk.FLAT, buttonbackground=self.HDR).pack(side=tk.LEFT)
-        self._info = tk.Label(ft, text="Waiting…", bg=self.HDR, fg=self.MUTED, font=small)
-        self._info.pack(side=tk.LEFT, padx=8)
-
-        # Watermark
-        wm = tk.Label(r, text="by github.com/aplatogg",
-                      bg=self.BG, fg=self.MUTED, font=tiny, anchor=tk.CENTER)
-        wm.pack(fill=tk.X, pady=(0, 3))
+        self._ebtn = tk.Button(ft, text=f"ELO: {self._elo[0]}", bg=self.DARK, fg=self.YELL,
+                               font=tiny, relief=tk.FLAT, padx=5,
+                               cursor="hand2", command=self._cycle_elo)
+        self._ebtn.pack(side=tk.LEFT, padx=(6, 2))
+        self._info = tk.Label(ft, text="Waiting…", bg=self.HDR, fg=self.MUTED, font=tiny)
+        self._info.pack(side=tk.RIGHT, padx=8)
 
         r.after(80, self._poll)
+
+    def _hover_row(self, row, lbl, badge, entering: bool):
+        col = self.HOVER if entering else self.ROW_BG
+        row.config(bg=col); lbl.config(bg=col); badge.config(bg=col)
+
+    def _on_click_move(self, idx: int):
+        if idx < len(self._cur_moves):
+            mv = self._cur_moves[idx]
+            try:
+                self._mq.put_nowait(mv.uci)
+                self._turn_lbl.config(text=f"▶ Manual klik: {self._fmt_move(mv)}", fg=self.CYAN)
+            except Exception:
+                pass
+
+    def _toggle_compact(self):
+        self._compact = not self._compact
+        if self._compact:
+            self._body.pack_forget()
+            self.root.geometry(f"{self.W}x{self.COMPACT_H}")
+            self._cbtn.config(text="▣")
+        else:
+            self._body.pack(fill=tk.BOTH, expand=True)
+            self.root.geometry(f"{self.W}x{self.H}")
+            self._cbtn.config(text="▬")
+
+    def _toggle_opacity(self):
+        self._op_idx = (self._op_idx + 1) % len(self._OPACITIES)
+        alpha = self._OPACITIES[self._op_idx]
+        try:
+            self.root.attributes("-alpha", alpha)
+        except Exception:
+            pass
+        self._obtn.config(text=f"{int(alpha * 100)}%")
+
+    def _cycle_elo(self):
+        cur = self._elo[0]
+        idx = (ELO_PRESETS.index(cur) + 1) % len(ELO_PRESETS) if cur in ELO_PRESETS else 0
+        nxt = ELO_PRESETS[idx]
+        self._elo[0] = nxt
+        col = self.GREEN if nxt == "MAX" else self.YELL if nxt == "2200" else self.ORANGE
+        self._ebtn.config(text=f"ELO: {nxt}", fg=col)
+        self._lfr[0] = ""
+        log.info("ELO preset -> %s", nxt)
 
     def _close(self):
         log.info("Overlay closed → shutdown")
@@ -756,6 +908,12 @@ class OverlayUI:
         try:
             while True: self._render(self._q.get_nowait())
         except queue.Empty: pass
+        if self._countdown_end > 0:
+            rem = self._countdown_end - time.monotonic()
+            if rem > 0:
+                self._turn_lbl.config(text=f"⚡ {self._countdown_txt} ({rem:.1f}s…)", fg=self.CYAN)
+            else:
+                self._countdown_end = 0.0
         if self.root and not self._ev.is_set():
             try:
                 self.root.after(80, self._poll)
@@ -776,8 +934,15 @@ class OverlayUI:
             name = 'Bidak'
         return f"{name} {frm}->{to}"
 
+    def _badge_color(self, tag: str) -> str:
+        if tag == "BEST": return self.GREEN
+        if tag == "GOOD": return self.BLUE
+        if tag == "OK":   return self.YELL
+        return self.RED
+
     def _render(self, a: AnalysisResult):
         self._dot.config(fg=self.GREEN if not a.game_over else self.RED)
+        self._cur_moves = list(a.top_moves)
         # Opening name
         self._opening_lbl.config(text=a.opening if a.opening else "")
         # Time left
@@ -791,19 +956,38 @@ class OverlayUI:
             self._time_lbl.config(text="")
 
         if a.game_over:
+            self._countdown_end = 0.0
             self._eval_lbl.config(text=a.result or "Game Over", fg=self.MUTED)
+            self._turn_lbl.config(text="🏁 Game selesai — menunggu game baru…", fg=self.MUTED)
             self._best.config(text="—")
-            self._info.config(text="Game finished — waiting for next…")
+            self._info.config(text="Game over")
             self._draw_bar(0., None)
-            for l in self._mlbls: l.config(text="")
+            for l, b in zip(self._mlbls, self._mbadges):
+                l.config(text=""); b.config(text="")
             self._set_pv("Game over.")
             return
+
+        # Turn / Countdown banner
+        side_str = "PUTIH" if a.turn == "white" else "HITAM"
+        if a.think_delay > 0 and a.chosen_uci:
+            chosen_mv = next((x for x in a.top_moves if x.uci == a.chosen_uci), a.top_moves[0] if a.top_moves else None)
+            mv_label = self._fmt_move(chosen_mv) if chosen_mv else a.chosen_uci
+            self._countdown_txt = f"AUTO: {mv_label}"
+            self._countdown_end = time.monotonic() + a.think_delay
+            self._turn_lbl.config(text=f"⚡ {self._countdown_txt} ({a.think_delay:.1f}s…)", fg=self.CYAN)
+        else:
+            self._countdown_end = 0.0
+            if a.is_our_turn:
+                self._turn_lbl.config(text=f"🟢 GILIRAN LU ({side_str})", fg=self.GREEN)
+            else:
+                self._turn_lbl.config(text=f"⏳ LAWAN JALAN ({side_str})", fg=self.YELL)
+
         if a.mate is not None:
             mate_str = f"M{abs(a.mate)}" if a.mate >= 0 else f"-M{abs(a.mate)}"
-            lbl = f"{mate_str}  {a.win_prob:.0f}%"
+            lbl = f"{mate_str}  ({a.win_prob:.0f}%)"
             col = self.GREEN if a.mate > 0 else self.RED
         else:
-            lbl = f"{a.eval_score:+.2f}  {a.win_prob:.0f}%"
+            lbl = f"{a.eval_score:+.2f}  ({a.win_prob:.0f}%)"
             col = self.GREEN if a.eval_score >= 0 else self.RED
         self._eval_lbl.config(text=lbl, fg=col)
         self._draw_bar(a.eval_score, a.mate)
@@ -811,17 +995,20 @@ class OverlayUI:
             self._best.config(text=self._fmt_move(a.top_moves[0]), fg=self.GREEN)
         else:
             self._best.config(text="—", fg=self.MUTED)
-        for i, l in enumerate(self._mlbls):
-            if i < len(a.top_moves):
+        best_mv = a.top_moves[0] if a.top_moves else None
+        for i, (l, b) in enumerate(zip(self._mlbls, self._mbadges)):
+            if i < len(a.top_moves) and best_mv is not None:
                 m  = a.top_moves[i]
                 sc = (f"M{abs(m.mate)}" if m.mate is not None and m.mate >= 0
                       else f"-M{abs(m.mate)}" if m.mate is not None
                       else f"{m.score:+.2f}")
-                l.config(text=f"  {i+1}. {self._fmt_move(m):<14} {sc:>7}   d{m.depth}")
+                tag = _move_quality_tag(best_mv, m, i)
+                l.config(text=f"{i+1}. {self._fmt_move(m):<14} {sc:>6} d{m.depth}")
+                b.config(text=f"[{tag}]", fg=self._badge_color(tag))
             else:
-                l.config(text="")
+                l.config(text=""); b.config(text="")
         self._set_pv("  ".join(a.pv) if a.pv else "—")
-        self._info.config(text=f"d{a.depth} · {'Putih' if a.turn=='white' else 'Hitam'} jalan")
+        self._info.config(text=f"d{a.depth} · {'Putih' if a.turn=='white' else 'Hitam'}")
 
     def _draw_bar(self, score, mate):
         self._bar.update_idletasks()
@@ -830,10 +1017,10 @@ class OverlayUI:
                  else (max(-8., min(8., score)) + 8.) / 16.)
         wp = int(w * ratio)
         self._bar.delete("all")
-        self._bar.create_rectangle(0, 0, wp, 20, fill="#e8e8e8", outline="")
-        self._bar.create_rectangle(wp, 0, w, 20, fill="#1a1a1a", outline="")
+        self._bar.create_rectangle(0, 0, wp, 18, fill="#e8e8e8", outline="")
+        self._bar.create_rectangle(wp, 0, w, 18, fill="#1a1a1a", outline="")
         if 2 <= wp <= w - 2:
-            self._bar.create_line(wp, 0, wp, 20, fill="#777", width=1)
+            self._bar.create_line(wp, 0, wp, 18, fill="#777", width=1)
 
     def _set_pv(self, text):
         self._pv.config(state=tk.NORMAL)
@@ -857,14 +1044,16 @@ class ChessAssistant:
         self._depth    = [depth]
         self._port     = port
         self._stockfish = Path(stockfish).expanduser() if stockfish else None
-        self._ui_q     = queue.Queue(maxsize=3)
+        self._ui_q     = queue.Queue(maxsize=4)
+        self._manual_q = queue.Queue(maxsize=4)
         self._shutdown = threading.Event()
         self._engine: Optional[Engine] = None
         self._last_fen_ref  = [""]
         self._last_color    = "white"
         self._last_play_ts  = 0.
         self._throttle_done = False
-        self._natural       = [True]  # True=humanlike, False=bot speed
+        self._natural       = [True]   # True=humanlike, False=bot speed
+        self._elo_preset    = ["MAX"]  # MAX, 2200, 1800, 1500
 
     @staticmethod
     def _calc_depth(base: int, time_left: Optional[float]) -> int:
@@ -878,10 +1067,24 @@ class ChessAssistant:
 
     @staticmethod
     def _human_think_time(result: AnalysisResult, time_left: Optional[float]) -> float:
-        """Return human-like think delay (NAT mode): flat 2–5 seconds random."""
+        """Adaptive human-like think delay (NAT mode) based on clock and position complexity."""
         if time_left is not None and time_left < 10:
-            return random.uniform(0.5, 1.5)   # panik, waktu habis
-        return random.uniform(2.0, 5.0)
+            return random.uniform(0.35, 0.95)   # critical time / bullet scramble
+        if time_left is not None and time_left < 25:
+            return random.uniform(0.65, 1.45)   # low clock pressure
+        moves = result.top_moves
+        top_mate = result.mate if result.mate is not None else (moves[0].mate if moves else None)
+        if top_mate is not None:
+            if abs(top_mate) == 1:
+                return random.uniform(0.55, 1.15)  # instant mate-in-1 snap
+            return random.uniform(1.00, 2.10)
+        if len(moves) >= 2 and moves[1].mate is None:
+            gap = abs(moves[0].score - moves[1].score)
+            if gap >= 2.0:
+                return random.uniform(0.75, 1.60)  # obvious recapture / single forced reply
+            if gap < 0.35:
+                return random.uniform(2.50, 4.80)  # complex tactical choice
+        return random.uniform(1.50, 3.30)
 
     @staticmethod
     def _bot_think_time(time_left: Optional[float]) -> float:
@@ -891,8 +1094,8 @@ class ChessAssistant:
         return random.uniform(0.2, 0.9)
 
     @staticmethod
-    def _pick_move(result: AnalysisResult) -> str:
-        """NAT mode: ~80% top-move rate — human-like accuracy."""
+    def _pick_move(result: AnalysisResult, elo_preset: str = "MAX") -> str:
+        """NAT mode: human-like move selection with ELO preset accuracy scaling."""
         moves = result.top_moves
         if not moves:
             return ""
@@ -900,11 +1103,12 @@ class ChessAssistant:
             return moves[0].uci
         n = len(moves)
         r = random.random()
-        # 80% top, 16% 2nd, 4% 3rd
-        if n >= 2 and r > 0.80 and moves[1].mate is None:
+        top_cut = 0.80 if elo_preset in ("MAX", "2200") else 0.68 if elo_preset == "1800" else 0.55
+        third_cut = 0.96 if elo_preset in ("MAX", "2200") else 0.90 if elo_preset == "1800" else 0.82
+        if n >= 2 and r > top_cut and moves[1].mate is None:
             diff1 = abs(moves[0].score - moves[1].score)
             if diff1 < 1.5:
-                if n >= 3 and r > 0.96 and moves[2].mate is None:
+                if n >= 3 and r > third_cut and moves[2].mate is None:
                     diff2 = abs(moves[0].score - moves[2].score)
                     if diff2 < 2.0:
                         return moves[2].uci
@@ -947,8 +1151,21 @@ class ChessAssistant:
             "stockfish.exe not found. Put it in the project folder, install it on PATH, or pass --stockfish PATH."
         )
 
+    def _push_ui(self, result: AnalysisResult):
+        try:
+            self._ui_q.put_nowait(result)
+        except queue.Full:
+            try:
+                self._ui_q.get_nowait()
+                self._ui_q.put_nowait(result)
+            except queue.Empty:
+                pass
+
     def _run_ui(self):
-        ui = OverlayUI(self._ui_q, self._auto, self._depth, self._shutdown, self._last_fen_ref, self._natural)
+        ui = OverlayUI(
+            self._ui_q, self._auto, self._depth, self._shutdown,
+            self._last_fen_ref, self._natural, self._elo_preset, self._manual_q
+        )
         ui.run()
         self._shutdown.set()
 
@@ -1046,6 +1263,23 @@ class ChessAssistant:
                             await asyncio.sleep(1.5)
                             continue
 
+                        # Handle manual click-to-play from OverlayUI top moves list
+                        try:
+                            manual_uci = self._manual_q.get_nowait()
+                        except queue.Empty:
+                            manual_uci = ""
+                        if manual_uci:
+                            try:
+                                self._last_color = await reader.color()
+                                log.info("Manual UI click-move: %s", manual_uci)
+                                await reader.click_move(manual_uci, self._last_color)
+                                self._last_play_ts = time.monotonic()
+                                self._last_fen_ref[0] = ""
+                                await asyncio.sleep(0.5)
+                                continue
+                            except Exception as ce:
+                                log.warning("Manual click move failed: %s", ce)
+
                         data = await reader.read()
                         if not data:
                             await asyncio.sleep(self.POLL)
@@ -1065,26 +1299,25 @@ class ChessAssistant:
                         move_num = len(moves)
 
                         _src = data.get("src","?"); _turn = data.get("turn","?")
-                        log.info("Analyze d=%d src=%s turn=%s color=%s time=%s opening=%s | %s",
-                                 depth, _src, _turn, self._last_color,
+                        log.info("Analyze d=%d elo=%s src=%s turn=%s color=%s time=%s opening=%s | %s",
+                                 depth, self._elo_preset[0], _src, _turn, self._last_color,
                                  f"{time_left:.0f}s" if time_left else "?",
                                  opening or "-", fen[:40])
 
+                        await self._engine.set_elo_preset(self._elo_preset[0])
                         result = await self._engine.analyze(fen, depth)
-                        result.opening  = opening
-                        result.time_left = time_left
-                        result.win_prob = _score_to_winpct(result.eval_score, result.mate)
+                        our = ((self._last_color == "white" and result.turn == "white") or
+                               (self._last_color == "black" and result.turn == "black"))
+                        result.opening     = opening
+                        result.time_left   = time_left
+                        result.win_prob    = _score_to_winpct(result.eval_score, result.mate)
+                        result.our_color   = self._last_color
+                        result.is_our_turn = our
 
-                        try:
-                            self._ui_q.put_nowait(result)
-                        except queue.Full:
-                            try: self._ui_q.get_nowait(); self._ui_q.put_nowait(result)
-                            except queue.Empty: pass
+                        self._push_ui(result)
 
                         # Auto-play
                         if self._auto[0] and not result.game_over and result.top_moves:
-                            our = ((self._last_color == "white" and result.turn == "white") or
-                                   (self._last_color == "black" and result.turn == "black"))
                             since = time.monotonic() - self._last_play_ts
                             if not our:
                                 log.debug("Auto-play skip: not our turn (color=%s turn=%s)",
@@ -1098,13 +1331,16 @@ class ChessAssistant:
                                     dl  = random.uniform(1.0, 2.2)
                                     log.info("Auto-play [OPENING %d]: %s think=%.1fs", move_num+1, uci, dl)
                                 elif self._natural[0]:
-                                    uci = self._pick_move(result)
+                                    uci = self._pick_move(result, self._elo_preset[0])
                                     dl  = self._human_think_time(result, time_left)
-                                    log.info("Auto-play [NAT]: %s think=%.1fs", uci, dl)
+                                    log.info("Auto-play [NAT %s]: %s think=%.1fs", self._elo_preset[0], uci, dl)
                                 else:
                                     uci = self._pick_move_bot(result)
                                     dl  = self._bot_think_time(time_left)
                                     log.info("Auto-play [BOT]: %s think=%.2fs", uci, dl)
+                                result.chosen_uci  = uci
+                                result.think_delay = dl
+                                self._push_ui(result)
                                 await asyncio.sleep(dl)
                                 cur = await reader.read()
                                 cur_fen = cur.get("fen","") if cur else ""

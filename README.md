@@ -11,12 +11,14 @@ Reads the live board state via browser CDP, analyzes with Stockfish, and shows a
 
 ## Features
 
-- **Live board reading** — grabs FEN directly from the Chess.com game object (no screen capture)
-- **Stockfish analysis** — top 5 moves with scores, depth, and full principal variation
-- **Floating overlay UI** — always-on-top panel with eval bar, win%, opening name, clock
-- **Auto-play** — two modes:
-  - `NAT` — human-like timing (2–5s think time, ~80% best move rate)
-  - `BOT` — engine-like speed (~0.2–0.9s, ~93% best move rate)
+- **Live board reading** — grabs full FEN (including castling rights & en passant) directly from the Chess.com game object (no screen capture)
+- **Stockfish multi-thread analysis** — top 5 moves with scores, depth, move quality badges (`[BEST]`, `[GOOD]`, `[OK]`, `[RISK]`), and full principal variation
+- **Interactive Modern HUD (`tkinter`)** — zero DOM footprint inside the browser tab, click any top-move row to execute it immediately on the board, live turn & countdown banner, opacity toggle (`100% / 85% / 70%`), and collapsible compact mode (`▬`)
+- **Auto-play & Humanization (`v1.1.0`)**:
+  - `NAT` — adaptive human timing (fast `0.75–1.6s` on obvious recaptures/forced moves, `2.5–4.8s` on complex close decisions, instant mate-in-1 snap, and time-trouble acceleration)
+  - `BOT` — engine-like speed (`~0.2–0.9s`, `~93%` best move rate, forced-mate lock)
+  - `ELO Presets` (`MAX / 2200 / 1800 / 1500`) — scales Stockfish `UCI_LimitStrength` / `Skill Level` and move variety live from the HUD footer
+- **Full promotion & endgame support** — supports all 4 promotion piece types (`=Q`, `=N`, `=R`, `=B`) and 2-piece endgames
 - **Opening book** — recognizes 60+ openings and displays the name live
 - **Time management** — auto-reduces analysis depth when clock is low
 - **Anti-throttle** — injects silent Web Audio to prevent background-tab slowdowns
@@ -108,20 +110,24 @@ python chess_assistant.py --launch
 
 <p align="center"><sub>Example analysis of a Queen's Gambit Declined position.</sub></p>
 
-| Button | Action |
+| Control | Action |
 |--------|--------|
+| `Click Top Move #1–#5` | Immediately execute that move on the board (works even when `AUTO: OFF`) |
 | `AUTO: ON/OFF` | Toggle auto-play |
-| `NAT / BOT` | Switch between human-like and engine-like play style |
+| `NAT / BOT` | Switch between adaptive human-like and engine-like play style |
+| `ELO: MAX / 2200 / 1800 / 1500` | Cycle engine strength & human move accuracy preset |
+| `100% / 85% / 70%` | Cycle HUD window transparency (`-alpha`) |
+| `▬ / ▣` | Collapse/expand HUD into a compact mini bar |
 | `Depth spinner` | Adjust Stockfish analysis depth (5–30) |
 
 ---
 
 ## Auto-play Modes
 
-| Mode | Think time | Best move % | Use case |
+| Mode | Think time | Move accuracy | Behavior |
 |------|-----------|-------------|---------|
-| **NAT** | 2–5 seconds | ~80% | Looks human, avoids detection |
-| **BOT** | 0.2–0.9 seconds | ~93% | Fastest, engine-like |
+| **NAT** | Adaptive (`0.75–1.6s` forced, `1.5–3.3s` normal, `2.5–4.8s` tactical) | Scales with `ELO` preset (`~80%` at `MAX`, `100%` on forced mates) | Human-like pacing and natural move distribution |
+| **BOT** | `0.2–0.9s` (`0.1–0.3s` under 15s) | `~93%` (`100%` on forced mates) | Maximum speed, engine-like |
 
 Both modes automatically play faster when clock is below 30 seconds.
 

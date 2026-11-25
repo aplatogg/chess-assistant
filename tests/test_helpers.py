@@ -11,6 +11,7 @@ from chess_assistant import (
     Engine,
     MoveInfo,
     OverlayUI,
+    _move_quality_tag,
     _score_to_winpct,
     get_opening_name,
 )
@@ -59,10 +60,29 @@ def test_analysis_depth_shrinks_with_the_clock():
 
 def test_think_time_ranges(monkeypatch):
     monkeypatch.setattr(random, "uniform", lambda low, high: low)
-    assert ChessAssistant._human_think_time(make_result(), 5) == 0.5
-    assert ChessAssistant._human_think_time(make_result(), 120) == 2.0
+    assert ChessAssistant._human_think_time(make_result(), 5) == 0.35
+    assert ChessAssistant._human_think_time(make_result(), 20) == 0.65
+    assert ChessAssistant._human_think_time(make_result(), 120) == 1.50
+    # Obvious forced recapture (gap >= 2.0) plays faster than complex close choice (gap < 0.35)
+    assert ChessAssistant._human_think_time(make_result(3.5, 0.5), 120) == 0.75
+    assert ChessAssistant._human_think_time(make_result(0.5, 0.35), 120) == 2.50
     assert ChessAssistant._bot_think_time(5) == 0.1
     assert ChessAssistant._bot_think_time(120) == 0.2
+
+
+def test_move_quality_tags():
+    moves = make_moves(1.20, 1.00, 0.50, -0.40)
+    assert _move_quality_tag(moves[0], moves[0], 0) == "BEST"
+    assert _move_quality_tag(moves[0], moves[1], 1) == "GOOD"
+    assert _move_quality_tag(moves[0], moves[2], 2) == "OK"
+    assert _move_quality_tag(moves[0], moves[3], 3) == "RISK"
+
+
+def test_elo_preset_scales_human_move_variety(monkeypatch):
+    monkeypatch.setattr(random, "random", lambda: 0.65)
+    res = make_result(0.4, 0.2, 0.1)
+    assert ChessAssistant._pick_move(res, "MAX") == "move0"
+    assert ChessAssistant._pick_move(res, "1500") == "move1"
 
 
 def test_move_picker_without_moves_is_empty():
