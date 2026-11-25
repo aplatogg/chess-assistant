@@ -33,7 +33,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from playwright.async_api import async_playwright, Page, Browser
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 APP_DIR = Path(__file__).resolve().parent
@@ -184,8 +184,8 @@ def _score_to_winpct(score: float, mate: Optional[int]) -> float:
 # ─── JavaScript ───────────────────────────────────────────────────────────────
 _JS_IS_GAME = r"""
 () => {
-    if (!/chess\.com\/(play|game|live|daily)\//i.test(location.href)) return false;
-    return document.querySelectorAll('.piece').length >= 10;
+    if (!/chess\.com\/(play|game|live|daily|puzzles|practice|analysis|classroom)/i.test(location.href)) return false;
+    return document.querySelectorAll('.piece').length >= 2;
 }
 """
 
@@ -218,7 +218,7 @@ _JS_READ_BOARD = r"""
             try {
                 const raw = fnFen.call(g);
                 if (raw && raw.split('/').length === 8) {
-                    const parts = raw.split(' ');
+                    const parts = raw.trim().split(/\s+/);
                     let turn = (parts[1] === 'w' || parts[1] === 'b') ? parts[1] : null;
                     if (!turn) {
                         const tp = g.getTurn || g.turn;
@@ -226,9 +226,18 @@ _JS_READ_BOARD = r"""
                         else if (typeof tp === 'string' && tp) turn = tp[0].toLowerCase();
                     }
                     if (!turn) turn = detectTurn();
+                    const castling = (parts[2] && /^(-|[KQkq]{1,4})$/.test(parts[2])) ? parts[2] : '-';
+                    const ep = (parts[3] && /^(-|[a-h][36])$/.test(parts[3])) ? parts[3] : '-';
+                    const half = (parts[4] && /^\d+$/.test(parts[4])) ? parts[4] : '0';
+                    const full = (parts[5] && /^\d+$/.test(parts[5])) ? parts[5] : '1';
                     const fnO = g.isGameOver || g.isOver;
                     const ov = typeof fnO === 'function' ? fnO.call(g) : false;
-                    return { fen: parts[0]+' '+(turn||'w')+' - - 0 1', turn, over: ov, src: 'api' };
+                    return {
+                        fen: [parts[0], (turn || 'w'), castling, ep, half, full].join(' '),
+                        turn,
+                        over: ov,
+                        src: 'api'
+                    };
                 }
             } catch(e) {}
         }
@@ -301,9 +310,20 @@ _JS_SQUARE_COORDS = r"""
 }
 """
 
-_JS_PROMO_QUEEN = r"""
-() => {
-    for (const s of ['[data-piece="wQ"]','[data-piece="bQ"]','[class*="promotion"] [class*="queen"]']) {
+_JS_PROMO_PIECE = r"""
+(piece) => {
+    const p = String(piece || 'q').toLowerCase();
+    const up = p.toUpperCase();
+    const names = { q: 'queen', n: 'knight', r: 'rook', b: 'bishop' };
+    const word = names[p] || 'queen';
+    const sels = [
+        `[data-piece="w${up}"]`, `[data-piece="b${up}"]`,
+        `.promotion-piece.w${p}`, `.promotion-piece.b${p}`,
+        `[class*="promotion"] [class*="${word}"]`,
+        `[class*="promotion-piece"][class*="w${p}"]`,
+        `[class*="promotion-piece"][class*="b${p}"]`,
+    ];
+    for (const s of sels) {
         const el = document.querySelector(s);
         if (el) { el.click(); return true; }
     }
@@ -476,9 +496,9 @@ class BoardReader:
         await self._click_square(sf, sr, flip)
         await asyncio.sleep(0.13 + random.uniform(0, 0.08))
         await self._click_square(df, dr, flip)
-        if len(uci) == 5 and uci[4] == 'q':
+        if len(uci) == 5 and uci[4].lower() in ("q", "n", "r", "b"):
             await asyncio.sleep(0.35)
-            await self._p.evaluate(_JS_PROMO_QUEEN)
+            await self._p.evaluate(_JS_PROMO_PIECE, uci[4].lower())
 
 
 # ─── Async Stockfish engine ────────────────────────────────────────────────────
@@ -508,11 +528,21 @@ class Engine:
         parts = fen.split()
         if not parts:
             return fen
-        if len(parts) >= 3:
-            parts[2] = '-'
         if len(parts) < 6:
             parts += ['w', '-', '-', '0', '1'][len(parts) - 1:]
-        return ' '.join(parts[:6])
+        parts = parts[:6]
+        candidate = ' '.join(parts)
+        try:
+            board = chess.Board(candidate)
+            st = board.status()
+            if st & chess.STATUS_BAD_CASTLING_RIGHTS:
+                parts[2] = '-'
+            if st & chess.STATUS_INVALID_EP_SQUARE:
+                parts[3] = '-'
+        except Exception:
+            parts[2] = '-'
+            parts[3] = '-'
+        return ' '.join(parts)
 
     async def analyze(self, fen: str, depth: int) -> AnalysisResult:
         fen = self._sanitize_fen(fen)
@@ -737,7 +767,9 @@ class OverlayUI:
         uci = m.uci; san = m.san
         if len(uci) < 4: return uci
         frm, to = uci[:2], uci[2:4]
-        if uci[4:5] == 'q': return f"Bidak {frm}->{to}=Ratu"
+        if len(uci) == 5 and uci[4].lower() in ("q", "n", "r", "b"):
+            promo_name = OverlayUI._PIECE_NAME.get(uci[4].upper(), "Ratu")
+            return f"Bidak {frm}->{to}={promo_name}"
         if san and san[0].upper() in 'KQRBN' and san[0].isupper():
             name = OverlayUI._PIECE_NAME.get(san[0], san[0])
         else:
@@ -864,13 +896,15 @@ class ChessAssistant:
         moves = result.top_moves
         if not moves:
             return ""
+        if moves[0].mate is not None:
+            return moves[0].uci
         n = len(moves)
         r = random.random()
         # 80% top, 16% 2nd, 4% 3rd
-        if n >= 2 and r > 0.80:
+        if n >= 2 and r > 0.80 and moves[1].mate is None:
             diff1 = abs(moves[0].score - moves[1].score)
             if diff1 < 1.5:
-                if n >= 3 and r > 0.96:
+                if n >= 3 and r > 0.96 and moves[2].mate is None:
                     diff2 = abs(moves[0].score - moves[2].score)
                     if diff2 < 2.0:
                         return moves[2].uci
@@ -883,13 +917,15 @@ class ChessAssistant:
         moves = result.top_moves
         if not moves:
             return ""
+        if moves[0].mate is not None:
+            return moves[0].uci
         n = len(moves)
         r = random.random()
         # 93% top, 6% 2nd, 1% 3rd
-        if n >= 2 and r > 0.93:
+        if n >= 2 and r > 0.93 and moves[1].mate is None:
             diff1 = abs(moves[0].score - moves[1].score)
             if diff1 < 0.8:
-                if n >= 3 and r > 0.99:
+                if n >= 3 and r > 0.99 and moves[2].mate is None:
                     diff2 = abs(moves[0].score - moves[2].score)
                     if diff2 < 1.2:
                         return moves[2].uci
@@ -1100,9 +1136,10 @@ class ChessAssistant:
                           log.error("Loop error: %s", e, exc_info=True)
                           await asyncio.sleep(2.)
 
-                    # Close current browser session
-                    try: await browser.close()
-                    except Exception: pass
+                    # Close current browser session only when we launched a dedicated profile
+                    if self._launch:
+                        try: await browser.close()
+                        except Exception: pass
 
                     if disconnected and not self._shutdown.is_set():
                         self._last_fen_ref[0] = ""

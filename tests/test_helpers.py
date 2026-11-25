@@ -10,6 +10,7 @@ from chess_assistant import (
     ChessAssistant,
     Engine,
     MoveInfo,
+    OverlayUI,
     _score_to_winpct,
     get_opening_name,
 )
@@ -92,10 +93,35 @@ def test_bot_picker_prefers_a_close_second_move(monkeypatch):
         ("8/8/8/8/8/8/8/8 w - -", "8/8/8/8/8/8/8/8 w - - 0 1"),
         ("8/8/8/8/8/8/8/8 w - - 0", "8/8/8/8/8/8/8/8 w - - 0 1"),
         ("8/8/8/8/8/8/8/8 w KQkq - 0 1", "8/8/8/8/8/8/8/8 w - - 0 1"),
+        (
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        ),
     ],
 )
-def test_sanitize_fen_pads_missing_fields(fen, expected):
+def test_sanitize_fen_pads_missing_fields_and_preserves_valid_castling(fen, expected):
     assert Engine._sanitize_fen(fen) == expected
+
+
+def test_picker_always_picks_fastest_forced_mate(monkeypatch):
+    monkeypatch.setattr(random, "random", lambda: 0.99)
+    res = AnalysisResult(
+        fen="8/8/8/8/8/8/8/8 w - - 0 1",
+        turn="white",
+        top_moves=[
+            MoveInfo(uci="h5f7", san="Qxf7#", score=99999.0, mate=1, depth=18),
+            MoveInfo(uci="h5e8", san="Qe8+", score=99999.0, mate=3, depth=18),
+        ],
+    )
+    assert ChessAssistant._pick_move(res) == "h5f7"
+    assert ChessAssistant._pick_move_bot(res) == "h5f7"
+
+
+def test_fmt_move_supports_underpromotion():
+    queen_promo = MoveInfo(uci="a7a8q", san="a8=Q", score=9.0, mate=None, depth=18)
+    knight_promo = MoveInfo(uci="a7a8n", san="a8=N+", score=6.5, mate=None, depth=18)
+    assert OverlayUI._fmt_move(queen_promo) == "Bidak a7->a8=Ratu"
+    assert OverlayUI._fmt_move(knight_promo) == "Bidak a7->a8=Kuda"
 
 
 def test_explicit_stockfish_path(tmp_path):
